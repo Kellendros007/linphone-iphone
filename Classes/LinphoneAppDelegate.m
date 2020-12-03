@@ -31,6 +31,9 @@
 #include "LinphoneManager.h"
 #include "linphone/linphonecore.h"
 
+#import <Intents/Intents.h>
+#import <IntentsUI/IntentsUI.h>
+
 #ifdef USE_CRASHLYTICS
 #include "FIRApp.h"
 #endif
@@ -256,7 +259,6 @@
 #ifdef USE_CRASHLYTICS
 	[FIRApp configure];
 #endif
-    
     UIApplication *app = [UIApplication sharedApplication];
 	UIApplicationState state = app.applicationState;
 
@@ -372,11 +374,13 @@
 		[PhoneMainView.instance presentViewController:errView animated:YES completion:nil];
     } else if([[url scheme] isEqualToString:@"message-linphone"]) {
         [PhoneMainView.instance popToView:ChatsListView.compositeViewDescription];
-    } else if ([scheme isEqualToString:@"sip"]) {
+    } else if ([scheme isEqualToString:@"sip"]||[scheme isEqualToString:@"sips"]) {
         // remove "sip://" from the URI, and do it correctly by taking resourceSpecifier and removing leading and
         // trailing "/"
         NSString *sipUri = [[url resourceSpecifier] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
-        [VIEW(DialerView) setAddress:sipUri];
+		[CallManager.instance performActionWhenCoreIsOnAction:^(void) {
+			[LinphoneManager.instance call: [LinphoneUtils normalizeSipOrPhoneAddress:sipUri]];
+		}];
     } else if ([scheme isEqualToString:@"linphone-widget"]) {
         if ([[url host] isEqualToString:@"call_log"] &&
             [[url path] isEqualToString:@"/show"]) {
@@ -404,11 +408,24 @@
 // used for callkit. Called when active video.
 - (BOOL)application:(UIApplication *)application continueUserActivity:(nonnull NSUserActivity *)userActivity restorationHandler:(nonnull void (^)(NSArray<id<UIUserActivityRestoring>> * _Nullable))restorationHandler
 {
+	
+	
 	if ([userActivity.activityType isEqualToString:@"INStartVideoCallIntent"]) {
 		LOGI(@"CallKit: satrt video.");
 		CallView *view = VIEW(CallView);
 		[view.videoButton setOn];
 	}
+	if ([userActivity.activityType isEqualToString:@"INStartAudioCallIntent"]) { // tel URI handler.
+		INInteraction *interaction = userActivity.interaction;
+		INStartAudioCallIntent *startAudioCallIntent = (INStartAudioCallIntent *)interaction.intent;
+		INPerson *contact = startAudioCallIntent.contacts[0];
+		INPersonHandle *personHandle = contact.personHandle;
+		[CallManager.instance performActionWhenCoreIsOnAction:^(void) {
+			[LinphoneManager.instance call: [LinphoneUtils normalizeSipOrPhoneAddress:personHandle.value]];
+		}];
+
+	}
+	
 	return YES;
 }
 

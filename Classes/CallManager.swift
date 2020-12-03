@@ -171,7 +171,7 @@ import AVFoundation
 			let callInfo = providerDelegate.callInfos[uuid!]
 			if (callInfo?.declined ?? false) {
 				// This call was declined.
-				providerDelegate.reportIncomingCall(call:nil, uuid: uuid!, handle: "Calling", hasVideo: true)
+				providerDelegate.reportIncomingCall(call:nil, uuid: uuid!, handle: "Calling", hasVideo: true, displayName: callInfo?.displayName ?? "Calling")
 				providerDelegate.endCall(uuid: uuid!)
 			}
 			return
@@ -179,21 +179,22 @@ import AVFoundation
 
 		let call = CallManager.instance().callByCallId(callId: callId)
 		if (call != nil) {
-			let addr = FastAddressBook.displayName(for: call?.remoteAddress?.getCobject) ?? "Unknow"
+			let displayName = FastAddressBook.displayName(for: call?.remoteAddress?.getCobject) ?? "Unknow"
 			let video = UIApplication.shared.applicationState == .active && (lc!.videoActivationPolicy?.automaticallyAccept ?? false) && (call!.remoteParams?.videoEnabled ?? false)
-			displayIncomingCall(call: call, handle: addr, hasVideo: video, callId: callId)
+			displayIncomingCall(call: call, handle: (call!.remoteAddress?.asStringUriOnly())!, hasVideo: video, callId: callId, displayName: displayName)
 		} else {
-			displayIncomingCall(call: nil, handle: "Calling", hasVideo: true, callId: callId)
+			displayIncomingCall(call: nil, handle: "Calling", hasVideo: true, callId: callId, displayName: "Calling")
 		}
 	}
 
-	func displayIncomingCall(call:Call?, handle: String, hasVideo: Bool, callId: String) {
+	func displayIncomingCall(call:Call?, handle: String, hasVideo: Bool, callId: String, displayName:String) {
 		let uuid = UUID()
 		let callInfo = CallInfo.newIncomingCallInfo(callId: callId)
 
 		providerDelegate.callInfos.updateValue(callInfo, forKey: uuid)
 		providerDelegate.uuids.updateValue(uuid, forKey: callId)
-		providerDelegate.reportIncomingCall(call:call, uuid: uuid, handle: handle, hasVideo: hasVideo)
+		providerDelegate.reportIncomingCall(call:call, uuid: uuid, handle: handle, hasVideo: hasVideo, displayName: displayName)
+		
 	}
 
 	@objc func acceptCall(call: OpaquePointer?, hasVideo:Bool) {
@@ -240,14 +241,15 @@ import AVFoundation
 		if (CallManager.callKitEnabled() && !CallManager.instance().nextCallIsTransfer) {
 			let uuid = UUID()
 			let name = FastAddressBook.displayName(for: addr) ?? "unknow"
-			let handle = CXHandle(type: .generic, value: name)
+			let handle = CXHandle(type: .generic, value: sAddr.asStringUriOnly())
 			let startCallAction = CXStartCallAction(call: uuid, handle: handle)
 			let transaction = CXTransaction(action: startCallAction)
 
-			let callInfo = CallInfo.newOutgoingCallInfo(addr: sAddr, isSas: isSas)
+			let callInfo = CallInfo.newOutgoingCallInfo(addr: sAddr, isSas: isSas, displayName: name)
 			providerDelegate.callInfos.updateValue(callInfo, forKey: uuid)
 			providerDelegate.uuids.updateValue(uuid, forKey: "")
 
+			setHeldOtherCalls(exceptCallid: "")
 			requestTransaction(transaction, action: "startCall")
 		}else {
 			try? doCall(addr: sAddr, isSas: isSas)
@@ -319,11 +321,6 @@ import AVFoundation
 			let groupAction = CXSetGroupCallAction(call: currentUuid!, callUUIDToGroupWith: newUuid)
 			let transcation = CXTransaction(action: groupAction)
 			requestTransaction(transcation, action: "groupCall")
-
-			// To simulate the real group call action
-			let heldAction = CXSetHeldCallAction(call: currentUuid!, onHold: false)
-			let otherTransacation = CXTransaction(action: heldAction)
-			requestTransaction(otherTransacation, action: "heldCall")
 		} else {
 			try? lc?.addAllToConference()
 		}
@@ -385,22 +382,56 @@ import AVFoundation
 
 	@objc func setHeld(call: OpaquePointer, hold: Bool) {
 		let sCall = Call.getSwiftObject(cObject: call)
-		let callid = sCall.callLog?.callId ?? ""
+		if (!hold) {
+			setHeldOtherCalls(exceptCallid: sCall.callLog?.callId ?? "")
+		}
+		setHeld(call: sCall, hold: hold)
+	}
+	
+	func setHeld(call: Call, hold: Bool) {
+		let callid = call.callLog?.callId ?? ""
 		let uuid = providerDelegate.uuids["\(callid)"]
-
 		if (uuid == nil) {
-			Log.directLog(BCTBX_LOG_ERROR, text: "Can not find correspondant call to group.")
+			Log.directLog(BCTBX_LOG_ERROR, text: "Can not find correspondant call to set held.")
 			return
 		}
 		let setHeldAction = CXSetHeldCallAction(call: uuid!, onHold: hold)
 		let transaction = CXTransaction(action: setHeldAction)
-
 		requestTransaction(transaction, action: "setHeld")
 	}
+
+	@objc func setHeldOtherCalls(exceptCallid: String) {
+		for call in CallManager.instance().lc!.calls {
+			if (call.callLog?.callId != exceptCallid && call.state != .Paused && call.state != .Pausing && call.state != .PausedByRemote) {
+				setHeld(call: call, hold: true)
+			}
+		}
+	}
+	
+	@objc func performActionWhenCoreIsOn(action:  @escaping ()->Void ) {
+		if (manager.globalState == .On) {
+			action()
+		} else {
+			manager.actionsToPerformOnceWhenCoreIsOn.append(action)
+		}
+	}
+	
 }
 
 class CoreManagerDelegate: CoreDelegate {
 	static var speaker_already_enabled : Bool = false
+	var globalState : GlobalState = .Off
+	var actionsToPerformOnceWhenCoreIsOn : [(()->Void)] = []
+	
+	override func onGlobalStateChanged(lc: Core, gstate: GlobalState, message: String) {
+		if (gstate == .On) {
+			actionsToPerformOnceWhenCoreIsOn.forEach {
+				$0()
+			}
+			actionsToPerformOnceWhenCoreIsOn.removeAll()
+		}
+		globalState = gstate
+	}
 	
 	override func onRegistrationStateChanged(lc: Core, cfg: ProxyConfig, cstate: RegistrationState, message: String) {
 		if lc.proxyConfigList.count == 1 && (cstate == .Failed || cstate == .Cleared){
@@ -416,7 +447,7 @@ class CoreManagerDelegate: CoreDelegate {
 
 	override func onCallStateChanged(lc: Core, call: Call, cstate: Call.State, message: String) {
 		let addr = call.remoteAddress;
-		let address = FastAddressBook.displayName(for: addr?.getCobject) ?? "Unknow"
+		let displayName = FastAddressBook.displayName(for: addr?.getCobject) ?? "Unknow"
 		let callLog = call.callLog
 		let callId = callLog?.callId
 		let video = UIApplication.shared.applicationState == .active && (lc.videoActivationPolicy?.automaticallyAccept ?? false) && (call.remoteParams?.videoEnabled ?? false)
@@ -436,7 +467,7 @@ class CoreManagerDelegate: CoreDelegate {
 					let uuid = CallManager.instance().providerDelegate.uuids["\(callId!)"]
 					if (uuid != nil) {
 						// Tha app is now registered, updated the call already existed.
-						CallManager.instance().providerDelegate.updateCall(uuid: uuid!, handle: address, hasVideo: video)
+						CallManager.instance().providerDelegate.updateCall(uuid: uuid!, handle: addr!.asStringUriOnly(), hasVideo: video, displayName: displayName)
 						let callInfo = CallManager.instance().providerDelegate.callInfos[uuid!]
 						if (callInfo?.declined ?? false) {
 							DispatchQueue.main.asyncAfter(deadline: .now()) {try? call.decline(reason: callInfo!.reason)}
@@ -445,13 +476,13 @@ class CoreManagerDelegate: CoreDelegate {
 							CallManager.instance().acceptCall(call: call, hasVideo: video)
 						}
 					} else {
-						CallManager.instance().displayIncomingCall(call: call, handle: address, hasVideo: video, callId: callId!)
+						CallManager.instance().displayIncomingCall(call: call, handle: addr!.asStringUriOnly(), hasVideo: video, callId: callId!, displayName: displayName)
 					}
 				} else if (UIApplication.shared.applicationState != .active) {
 					// not support callkit , use notif
 					let content = UNMutableNotificationContent()
 					content.title = NSLocalizedString("Incoming call", comment: "")
-					content.body = address
+					content.body = displayName
 					content.sound = UNNotificationSound.init(named: UNNotificationSoundName.init("notes_of_the_optimistic.caf"))
 					content.categoryIdentifier = "call_cat"
 					content.userInfo = ["CallId" : callId!]
@@ -515,7 +546,7 @@ class CoreManagerDelegate: CoreDelegate {
 					// Configure the notification's payload.
 					let content = UNMutableNotificationContent()
 					content.title = NSString.localizedUserNotificationString(forKey: NSLocalizedString("Missed call", comment: ""), arguments: nil)
-					content.body = NSString.localizedUserNotificationString(forKey: address, arguments: nil)
+					content.body = NSString.localizedUserNotificationString(forKey: displayName, arguments: nil)
 
 					// Deliver the notification.
 					let request = UNNotificationRequest(identifier: "call_request", content: content, trigger: nil) // Schedule the notification.
