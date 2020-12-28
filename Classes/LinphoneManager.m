@@ -1856,8 +1856,10 @@ static int comp_call_state_paused(const LinphoneCall *call, const void *param) {
         NSString *token;
         NSString *services;
         if (remoteTokenString && PKTokenString) {
-            token = [NSString stringWithFormat:@"%@:remote&%@:voip", remoteTokenString, PKTokenString];
-            services = @"remote&voip";
+            //token = [NSString stringWithFormat:@"%@:remote&%@:voip", remoteTokenString, PKTokenString];
+            //services = @"remote&voip";
+            token = [NSString stringWithFormat:@"%@:voip", PKTokenString];
+            services = @"voip";
         } else if (remoteTokenString) {
             token = [NSString stringWithFormat:@"%@:remote", remoteTokenString];
             services = @"remote";
